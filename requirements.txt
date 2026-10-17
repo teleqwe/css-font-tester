@@ -1,0 +1,4 @@
+pillow>=12.3
+numpy>=2.5
+customtkinter>=6.0
+pyinstaller>=6.22   # (only to build the exe)
