@@ -288,13 +288,6 @@ def draw_np(arr, font, text, x, y, colour=(255, 255, 255, 255), copies=1):
         region[lit] = np.rint(255 * srgb(out[lit])).astype(np.uint8)
     return width
 
-def draw(img, font, text, x, y, colour=(255, 255, 255, 255), copies=1):
-    """draw_np onto a PIL RGB image."""
-    arr = np.array(img)
-    width = draw_np(arr, font, text, x, y, colour, copies)
-    img.paste(Image.fromarray(arr))
-    return width
-
 # ---- bitmap fonts -------------------------------------------------------------------------------------------------
 # vgui's bitmap font (CBitmapFont in CS:S x64 vguimatsurface.dll, read 2026-10-10). A .vbf: "VFNT", version 3, shorts
 # page width, page height, max char width, max char height, flags, ascent, glyph count, a 256-byte table char -> glyph,
@@ -358,14 +351,14 @@ class BitmapFont:
     def __init__(self, vbf, vtf, scalex=1.0, scaley=1.0, flags=0):
         f = open(vbf, 'rb').read()
         if f[:4] != b'VFNT': raise ValueError(f'{os.path.basename(vbf)} is not a bitmap font')
-        _, _, mw, mh, self.vbf_flags, asc, n = struct.unpack_from('<7h', f, 8)
+        _, _, _, mh, _, _, n = struct.unpack_from('<7h', f, 8)
         if n <= 0 or len(f) < 0x116 + 14 * n: raise ValueError(f'{os.path.basename(vbf)}: no letters in it')
         self.table = f[0x16:0x116]
         self.glyphs = [struct.unpack_from('<7h', f, 0x116 + 14 * i) for i in range(n)]
         self.page, self.point = read_vtf(vtf)
         self.sx, self.sy = f32(scalex), f32(scaley)
         self.face, self.flags = os.path.splitext(os.path.basename(vbf))[0], flags | FONTFLAG['bitmap']
-        self.height, self.ascent, self.max_wide = int(mh * self.sy), int(asc * self.sy), int(mw * self.sx)
+        self.height = int(mh * self.sy)
         self.additive = bool(flags & FONTFLAG['additive'])
         self._cells = {}
 
@@ -543,16 +536,6 @@ def _find_at(items, key):
 def _root_at(text):
     return next((v for k, v, *_ in parse_kv_at(text) if isinstance(v, list)), [])
 
-def entry_line(text, font, key):
-    """The line the font's entry `key` starts on (1 = the first), or 0 if the file hasn't it."""
-    b = _find_at(_root_at(text), 'Fonts')
-    b = b and isinstance(b[1], list) and _find_at(b[1], font)
-    e = b and isinstance(b[1], list) and _find_at(b[1], key)
-    return text.count('\n', 0, e[2]) + 1 if e else 0
-
-def has_entry(text, font, key):
-    return entry_line(text, font, key) > 0
-
 def has_fonts(text):
     b = _find_at(_root_at(text), 'Fonts')
     return bool(b and isinstance(b[1], list))
@@ -567,6 +550,7 @@ def block_text(text, font):
     if i is None: return None
     start = text.rfind('\n', 0, items[i][2]) + 1
     end = text.rfind('\n', 0, items[i + 1][2] if i + 1 < len(items) else fonts[3] - 1) + 1
+    if end <= start: return text.count('\n', 0, items[i][2]) + 1, text[items[i][2]:items[i][3]]   # (a block on one line)
     return text.count('\n', 0, start) + 1, text[start:end]
 
 def has_block(text, font):
@@ -578,6 +562,7 @@ def set_font_entry(text, font, key, entry, before=None):
     """A scheme file's text with the font's entry `key` written as `entry` (a dict), in place if the file has it, else
     put before the entry `before` (the game uses a font's first entry that fits), else added at the end of the font's
     block (the block too, at the end of Fonts, if it has none). The rest is kept as it was, byte for byte."""
+    plain(font, key, *entry.keys(), *entry.values())
     nl = '\r\n' if '\r\n' in text else '\n'
     def indent(at):
         line = text.rfind('\n', 0, at) + 1
@@ -604,42 +589,53 @@ def set_font_entry(text, font, key, entry, before=None):
     if text[at:close].strip(): return text[:close] + nl + lines(ind, body) + nl + text[close:]   # (a "{ ... }" on one line)
     return text[:at] + lines(ind, body) + nl + text[at:]
 
-def edit_scheme(path, change):
-    """Rewrite a scheme file through change(text) -> text, its bytes otherwise untouched; False if nothing changed."""
-    raw = open(path, 'rb').read()
-    if raw[:2] in (b'\xff\xfe', b'\xfe\xff'): raise ValueError(f'{os.path.basename(path)} is UTF-16: edit it by hand')
-    old = raw.decode('latin-1'); new = change(old)
-    if new == old: return False
-    data = new.encode('latin-1')                                # (before the file is opened: a character Latin-1 hasn't
-    tmp = path + '.fonttester-tmp'                              # can't leave it empty)
+def write_atomic(path, data):
+    """Bytes to a file all at once: written beside it, then put in its place (a crash leaves the old file whole; a
+    failed replace leaves no temp file)."""
+    tmp = path + '.fonttester-tmp'
     with open(tmp, 'wb') as f: f.write(data)
-    os.replace(tmp, path)                                       # (whole or not at all)
-    return True
+    try: os.replace(tmp, path)
+    except OSError: os.remove(tmp); raise
+
+def plain(*values):
+    """A quote or a line break in a key or value would break the scheme file (KeyValues has no escapes)."""
+    for v in values:
+        if any(c in str(v) for c in '"\r\n'): raise ValueError(f'{v!r}: a quote or line break can\'t go in a scheme file')
 
 def add_list_line(text, block, key, value, has=None):
     """A scheme file's text with "key" "value" in the list block (BitmapFontFiles, CustomFontFiles; a new one before
-    Fonts if it has none). has(list body) -> True: it's there already, nothing changed. The rest is kept as it was."""
+    Fonts if it has none). has(the block's items) -> True: it's there already, nothing changed. The rest is kept."""
+    plain(key, value)
     nl = '\r\n' if '\r\n' in text else '\n'
-    m = re.search(r'^[ \t]*"?' + block + r'"?[ \t]*(\[[^\]]*\])?\s*\{', text, re.M | re.I)
-    if m:
-        end = text.find('}', m.end())
-        if end < 0: raise ValueError(f'its {block} block has no closing brace')
-        if has and has(text[m.end():end]): return text
-        eol = text.find('\n', m.end())
-        if 0 <= eol < end: return text[:eol + 1] + f'\t\t"{key}"\t"{value}"' + nl + text[eol + 1:]
-        return text[:m.end()] + f' "{key}" "{value}" ' + text[m.end():]   # (the whole block on one line)
-    f = re.search(r'^[ \t]*"?Fonts"?[ \t]*(\[[^\]]*\])?\s*\{', text, re.M | re.I)
+    indent = lambda at: re.match(r'[ \t]*', text[text.rfind('\n', 0, at) + 1:]).group(0)
+    root, row = _root_at(text), f'"{key}"\t"{value}"'
+    b = _find_at(root, block)
+    if b and isinstance(b[1], list):
+        if has and has(b[1]): return text
+        close = b[3] - 1                                        # (its closing brace)
+        at = text.rfind('\n', 0, close) + 1
+        if text[at:close].strip(): return text[:close] + f' {row} ' + text[close:]   # (a block on one line)
+        return text[:at] + indent(b[2]) + '\t' + row + nl + text[at:]
+    f = _find_at(root, 'Fonts')
     if not f: raise ValueError(f'no Fonts block to put {block} before')
-    return text[:f.start()] + f'\t{block}{nl}\t{{{nl}\t\t"{key}"\t"{value}"{nl}\t}}{nl}{nl}' + text[f.start():]
+    at = text.rfind('\n', 0, f[2]) + 1
+    if text[at:f[2]].strip(): return text[:f[2]] + f'{block} {{ {row} }} ' + text[f[2]:]   # (Fonts not first on its line)
+    ind = indent(f[2])
+    return text[:at] + f'{ind}{block}{nl}{ind}{{{nl}{ind}\t{row}{nl}{ind}}}{nl}' + text[at:]
+
+def _strings(items):
+    for k, v, *_ in items:
+        yield k
+        yield from (_strings(v) if isinstance(v, list) else [v])
 
 def add_bitmap_file(text, name, rel):
     """BitmapFontFiles: "name" "rel" (nothing changed if the name is there)."""
-    return add_list_line(text, 'BitmapFontFiles', name, rel,
-                         lambda body: re.search(r'^\s*"?' + re.escape(name) + r'"?\s', body, re.M | re.I))
+    return add_list_line(text, 'BitmapFontFiles', name, rel, lambda items: any(k.lower() == name.lower() for k, *_ in items))
 
 def add_custom_font(text, rel, key):
     """CustomFontFiles: "key" "rel" (nothing changed if rel is listed)."""
-    return add_list_line(text, 'CustomFontFiles', key, rel, lambda body: rel.lower() in body.replace('\\', '/').lower())
+    return add_list_line(text, 'CustomFontFiles', key, rel,
+                         lambda items: any(rel.lower() == v.replace('\\', '/').lower() for v in _strings(items)))
 
 def font_file(face, weight=400, italic=False):
     """The font file Windows draws this face with (the HUD's own if it's loaded, else the PC's): (bytes, extension)."""
@@ -662,11 +658,11 @@ def font_file(face, weight=400, italic=False):
 CONDS = {'WIN32': True, 'WINDOWS': True}
 def _cond(expr):
     """[$WIN32], [!$OSX], [$WIN32||$X360] ... on a Windows PC."""
-    expr = expr.strip('[]').replace(' ', '')
+    expr = expr.strip('[]').replace(' ', '').upper()
     return any(all((not CONDS.get(t[2:], False)) if t.startswith('!$') else CONDS.get(t[1:], False)
                    for t in part.split('&&')) for part in expr.split('||'))
 
-TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|(\[[^\]]*\])|(\{)|(\})|(//[^\n]*)|([^\s{}"]+)')
+TOKEN = re.compile(r'"([^"]*)"|(\[[^\]]*\])|(\{)|(\})|(//[^\n]*)|([^\s{}"]+)')
 
 def parse_kv_at(text):
     """KeyValues text: [(key, value or list, start, end)] in order, start and end spanning the key to the end of its
@@ -725,10 +721,10 @@ def merge(mine, base):
 def load_scheme(path, fallback_dirs=(), read=None, seen=None):
     """A scheme file with its #base files merged in: (items, every file read). read(path) -> text, else the file."""
     seen = (seen or set()) | {os.path.normcase(os.path.abspath(path))}   # (a #base back to a file already read: skipped)
-    text = read(path) if read else open(path, encoding='utf-8', errors='replace').read()
-    bases = re.findall(r'^\s*#base\s+"?([^"\r\n]+)"?', text, re.M)
-    items = parse_kv(re.sub(r'^\s*#(base|include)[^\n]*', '', text, flags=re.M))
-    root = items[0][1] if items and isinstance(items[0][1], list) else items
+    text = read(path) if read else open(path, encoding='latin-1').read()
+    items = parse_kv(text)
+    bases = [v for k, v in items if k.lower() == '#base' and isinstance(v, str)]
+    root = next((v for k, v in items if isinstance(v, list)), [])
     files = [path]
     for b in bases:
         for d in [os.path.dirname(path), *fallback_dirs]:
@@ -738,6 +734,16 @@ def load_scheme(path, fallback_dirs=(), read=None, seen=None):
                 bi, bf = load_scheme(p, fallback_dirs, read, seen)
                 root = merge(root, bi); files += bf; break
     return root, files
+
+def atoi(v, d=0):
+    """A whole number as the game reads it (C's atoi): the leading digits, "12px" is 12; none: d."""
+    m = re.match(r'\s*[-+]?\d+', '' if v is None else str(v))
+    return int(m.group(0)) if m else d
+
+def atof(v, d=0.0):
+    """A number as the game reads it (C's atof): "1.5x" is 1.5; none: d."""
+    m = re.match(r'\s*[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?', '' if v is None else str(v))
+    return float(m.group(0)) if m else d
 
 def yres_range(d):
     """An entry's (lo, hi) screen heights, or None: every screen."""
@@ -760,11 +766,11 @@ def sized(d, screen_h, grow):
     blur and scan lines by int(height / 480 * v), a bitmap's scales the same way on scale x 10000, and anti-aliasing on
     if tall changed (vgui2.dll, read 2026-10-10)."""
     d = dict(d)
-    def num(k):                                                 # (atoi: "12px" is 12, "abc" is 0)
-        m = re.match(r'\s*[-+]?\d+', str(d.get(k, 0) or 0)); return int(m.group(0)) if m else 0
-    tall, blur, scan = max(0, num('tall')), max(0, num('blur')), max(0, num('scanlines'))
-    try: sx, sy = (f32(float(d.get(k, 1))) for k in ('scalex', 'scaley'))
-    except (ValueError, OverflowError): sx = sy = 0.0
+    tall, blur, scan = (max(0, atoi(d.get(k))) for k in ('tall', 'blur', 'scanlines'))
+    def scale(k):                                               # (each on its own, as atof: "1.5x" is 1.5)
+        try: return f32(atof(d.get(k, '1')))
+        except OverflowError: return 0.0
+    sx, sy = scale('scalex'), scale('scaley')
     if grow:
         g = lambda v: int(screen_h / 480 * v)
         was = tall
@@ -773,40 +779,26 @@ def sized(d, screen_h, grow):
         if tall != was: d['antialias'] = '1'
     return d, min(tall, 255), blur, scan, sx, sy                # (255: vgui2's cap, measured in game 2026-10-12)
 
+def fits(d, screen_h):
+    """The game uses a font's first entry whose yres holds the screen height; one without yres fits every screen."""
+    r = yres_range(d)
+    return not r or r[0] <= screen_h <= r[1]
+
+def current(entries, screen_h):
+    """The entry the game uses at this screen height (dict), or {}."""
+    return next((d for _, d in entries if fits(d, screen_h)), {})
+
 def place(entries, screen_h, scales=False):
     """Where an entry made at this screen height goes: (key, yres or None, the entry to put it before or None). The
     game uses a font's first entry whose yres fits; one without yres fits every screen. scales (a font with one entry
     the game grows with the screen, CenterPrintText: more entries break it): that entry, in place. Otherwise a new entry
     from just above the last range that ends below this screen up to 9999, before the one used now, so it's used from
     here up."""
-    fits = lambda d: not yres_range(d) or yres_range(d)[0] <= screen_h <= yres_range(d)[1]
-    cur = next((k for k, d in entries if fits(d)), None)
+    cur = next((k for k, d in entries if fits(d, screen_h)), None)
     if scales: return (cur or (entries[0][0] if entries else '1')), None, None
     prev = max([r[1] for k, d in entries if (r := yres_range(d)) and r[1] < screen_h], default=0)
     key = f'{prev + 1}+'
     return key, f'{prev + 1} 9999', (cur if cur and cur.lower() != key.lower() else None)
-
-def font_entry(scheme, font, screen_h, proportional=True, changes=None):
-    """The entry the game uses for a font at this screen height, and its pixel size: (entry dict, tall, blur,
-    scanlines, scalex, scaley, the entry's key). changes: keys to use instead of the entry's own (a preview's edits), applied before
-    sizing. Grown proportionally (vgui2.dll, read 2026-10-10): tall, blur and scan lines by int(height / 480 * v), a
-    bitmap's scales the same way on scale x 10000, and a font whose tall that changed gets anti-aliasing turned on."""
-    fonts = find(scheme, 'Fonts') or []
-    entries = find(fonts, font)
-    if not isinstance(entries, list): return None
-    st = screen_h                                           # (SourceScheme too: measured, see README)
-    for key, e in entries:
-        if not isinstance(e, list): continue
-        d = {k.lower(): v for k, v in reversed(e) if not isinstance(v, list)}   # (first one wins, as FindKey)
-        lo, hi = (list(map(int, re.findall(r'-?\d+', d.get('yres', '')))) + [0, 0])[:2]
-        if lo:
-            hi = hi or lo
-            if not lo <= st <= hi: continue
-        d.update(changes or {})
-        if 'yres' in (changes or {}):                           # (a changed yres: still this entry, sized by it)
-            lo, hi = (list(map(int, re.findall(r'-?\d+', d['yres']))) + [0, 0])[:2]
-        return (*sized(d, st, not lo and not hi and proportional), key)
-    return None
 
 def entry_text(d, label='1'):
     """A font entry as scheme text, its keys in the dict's order."""
@@ -831,14 +823,14 @@ def make_font(entry, bitmaps=None):
     d, tall, blur, scan, sx, sy = entry[:6]
     flags = 0
     for k, f in FONTFLAG.items():
-        if k not in ('blur',) and int(float(d.get(k, 0) or 0)): flags |= f
+        if k not in ('blur',) and atoi(d.get(k)): flags |= f
     if flags & FONTFLAG['bitmap']:
         vbf, vtf = (bitmaps or {}).get(d.get('name', '').lower(), (None, None))
         if not vbf: raise ValueError(f'no {d.get("name", "")!r} in BitmapFontFiles')
         for p in (vbf, vtf):
             if not os.path.isfile(p): raise ValueError(f'{os.path.basename(p)} not found')
         return BitmapFont(vbf, vtf, sx, sy, flags)
-    return Win32Font(d.get('name', ''), tall, int(float(d.get('weight', 0) or 0)), blur, scan, flags)
+    return Win32Font(d.get('name', ''), tall, atoi(d.get('weight')), blur, scan, flags)
 
 def bitmap_font_files(schemes, game_dirs):
     """Every scheme's BitmapFontFiles (the game keeps one list): {name, lower-case: (vbf, vtf)}, each file from the
@@ -883,20 +875,25 @@ if __name__ == '__main__':
     assert tuple(cell[2, 2]) == (0, 0, 0, 200), 'drop shadow: down-right, same alpha'
     s = parse_kv('"S" { Fonts { "F" { "1" { "name" "Arial" "tall" "10" "yres" "1 600" } "2" { "name" "Arial" "tall" "12" "yres" "601 2000" } '
                  '"3" { "name" "Arial" "tall" "18" } } "G" { "1" { "name" "Arial" [$OSX] "name" "Tahoma" [!$OSX] "tall" "18" } } } }')[0][1]
-    assert font_entry(s, 'F', 1080)[1] == 12 and font_entry(s, 'F', 480)[1] == 10, 'yres'
-    assert font_entry(s, 'G', 1440)[0]['name'] == 'Tahoma' and font_entry(s, 'G', 1440)[1] == 54, 'conditions, proportional'
+    def fe(scheme, font, h, changes=None):                     # (the entry used at this screen, sized: as the app does it)
+        d = {**current(font_entries(scheme, font), h), **(changes or {})}
+        return sized(d, h, not yres_range(d))
+    def draw(img, font, text, x, y, colour=(255, 255, 255, 255)):
+        arr = np.array(img); w = draw_np(arr, font, text, x, y, colour); img.paste(Image.fromarray(arr)); return w
+    assert fe(s, 'F', 1080)[1] == 12 and fe(s, 'F', 480)[1] == 10, 'yres'
+    assert fe(s, 'G', 1440)[0]['name'] == 'Tahoma' and fe(s, 'G', 1440)[1] == 54, 'conditions, proportional'
     f = Win32Font('Arial', 30, 400, flags=FONTFLAG['antialias'] | FONTFLAG['outline'])
     img = Image.new('RGB', (300, 50), (40, 40, 40)); w = draw(img, f, 'Speed: 123', 5, 5)
     assert w > 100 and img.getpixel((5 + layout(f, 'S')[0][0][0] + 8, 5 + f.ascent - 10)) != (40, 40, 40), 'a line draws'
-    assert font_entry(s, 'G', 1440, changes={'tall': '20', 'outline': '1'})[1] == 60, 'changes apply before sizing'
+    assert fe(s, 'G', 1440, changes={'tall': '20', 'outline': '1'})[1] == 60, 'changes apply before sizing'
     assert 'Arial' in faces() and '"outline"' in entry_text({'name': 'Arial', 'outline': '1'}), 'faces, entry text'
     # proportional growth: anti-aliasing on, a bitmap's scale by height / 480 on scale x 10000
-    assert font_entry(s, 'G', 1440)[0].get('antialias') == '1' and 'antialias' not in font_entry(s, 'F', 1080)[0]
+    assert fe(s, 'G', 1440)[0].get('antialias') == '1' and 'antialias' not in fe(s, 'F', 1080)[0]
     b = parse_kv('"S" { Fonts { "B" { "1" { "bitmap" "1" "name" "x" "scalex" "0.5" } } } }')[0][1]
-    assert font_entry(b, 'B', 1440)[4:] == (f32(15000 * f32(0.0001)), f32(30000 * f32(0.0001)), '1'), font_entry(b, 'B', 1440)[4:]
+    assert fe(b, 'B', 1440)[4:] == (f32(15000 * f32(0.0001)), f32(30000 * f32(0.0001))), fe(b, 'B', 1440)[4:]
     # a font baked to a bitmap draws the same as the Win32 font at scale 1, and the smooth outline keeps the spacing
-    import tempfile
-    tmp = tempfile.mkdtemp()
+    import atexit, shutil, tempfile
+    tmp = tempfile.mkdtemp(); atexit.register(shutil.rmtree, tmp, True)
     n, _ = bake(f, os.path.join(tmp, 'a'))
     bf = BitmapFont(os.path.join(tmp, 'a.vbf'), os.path.join(tmp, 'a.vtf'))
     assert n == len(BAKE) and bf.height == f.height and layout(bf, 'Speed: 123') == layout(f, 'Speed: 123')
@@ -928,12 +925,12 @@ if __name__ == '__main__':
     draw_np(one, so, 'O%', 2, 2, (255, 0, 0, 255), 1); draw_np(two, so, 'O%', 2, 2, (255, 0, 0, 255), 2)
     assert (one == two).all() and (one != 90).any(), 'sharp 100: drawn twice looks as drawn once'
     assert ev.abc('(')[0] == 0 and ev.abc('(')[0] + ev.abc('(')[1] + ev.abc('(')[2] == ink['('][1].max() + 1 + 2, 'even gaps'
-    assert font_entry(b, 'B', 1440, changes={'yres': '1 10000'})[4] == f32(0.5), 'a yres change: drawn unscaled'
+    assert fe(b, 'B', 1440, changes={'yres': '1 10000'})[4] == f32(0.5), 'a yres change: drawn unscaled'
     sch = '"Scheme"\r\n{\r\n\tColors\r\n\t{\r\n\t}\r\n\tFonts\r\n\t{\r\n\t}\r\n}\r\n'
     one = add_bitmap_file(sch, 'Big', 'materials/vgui/fonts/big.vbf')
     two = add_bitmap_file(one, 'Small', 'materials/vgui/fonts/small.vbf')
     got = find(parse_kv(two)[0][1], 'BitmapFontFiles')
-    assert got == [('Small', 'materials/vgui/fonts/small.vbf'), ('Big', 'materials/vgui/fonts/big.vbf')], got
+    assert got == [('Big', 'materials/vgui/fonts/big.vbf'), ('Small', 'materials/vgui/fonts/small.vbf')], got   # (new ones last)
     assert add_bitmap_file(two, 'big', 'x') == two and two.count('\n') == two.count('\r\n') and two.startswith(sch[:30])
     s2 = set_font_entry(two, 'Speed', '1', {'name': 'Arial', 'tall': '20'})
     s3 = set_font_entry(s2, 'Speed', '1', {'bitmap': '1', 'name': 'Big'})
@@ -943,8 +940,8 @@ if __name__ == '__main__':
     bt = block_text('"S"\n{\n\tFonts\n\t{\n\t\t// a\n\t\tA\n\t\t{\n\t\t}\n\n\t\tB\n\t\t{\n\t\t}\n\t}\n}\n', 'A')
     assert bt == (6, '\t\tA\n\t\t{\n\t\t}\n\n'), bt
     assert block_text('"S" { Fonts { B { } } }', 'B')[0] == 1 and block_text('"S" { Fonts { } }', 'B') is None
-    assert entry_line(s4, 'Speed', '2') == s4[:s4.index('"2"')].count('\n') + 1 and entry_line(s4, 'Speed', '9') == 0
-    assert s4.startswith(two[:two.index('Fonts')]) and s4.count('\n') == s4.count('\r\n') and has_entry(s4, 'speed', '2')
+    assert [k for k, _ in font_entries(parse_kv(s4)[0][1], 'speed')] == ['1', '2'], 'entries in place, the new one last'
+    assert s4.startswith(two[:two.index('Fonts')]) and s4.count('\n') == s4.count('\r\n')
     assert parse_kv_at('"a" { "b" "c" }')[0][2:] == (0, 15), 'spans'
     dot = np.zeros((31, 31), np.uint8); dot[15, 15] = 200
     disc = np.asarray(max_round(Image.fromarray(dot), 6.5))
@@ -985,10 +982,12 @@ if __name__ == '__main__':
     assert [x for x, _ in layout(ul, 'Q')[0]] == [-ul.abc('Q')[0]], 'underlined, smoothed: a to the left'
     for x in (ar, mar, ul): x.close()
     # what the code review found (2026-10-17): none of these may crash, corrupt or empty a file
-    sp = os.path.join(tmp, 'safe.res'); open(sp, 'w').write('"S" { Fonts { "A" { "1" { "name" "Arial" } } } }\n')
-    try: edit_scheme(sp, lambda t: set_font_entry(t, 'A', '1', {'name': '微软雅黑'})); raise AssertionError('no error')
-    except UnicodeEncodeError: pass
-    assert open(sp).read().startswith('"S" { Fonts'), 'a failed save leaves the file as it was'
+    sp = os.path.join(tmp, 'safe.res')
+    for bad in ('Ari"al', 'a' + chr(10) + 'b'):                 # (a quote or a line break would break the file)
+        try: set_font_entry('"S" { Fonts { } }', 'A', '1', {'name': bad}); raise AssertionError(f'{bad!r} taken')
+        except ValueError: pass
+    try: add_bitmap_file('"S" { Fonts { } }', 'x"y', 'x.vbf'); raise AssertionError('quote taken')
+    except ValueError: pass
     one = set_font_entry('"S" { Fonts { "A" { "1" { "name" "Arial" } } } }', 'A', '2', {'name': 'Tahoma'})
     assert find(find(parse_kv(one)[0][1], 'Fonts'), 'A')[1][0] == '2', 'a one-line block: the entry inside it'
     one = add_bitmap_file('"S"' + chr(10) + '{' + chr(10) + ' BitmapFontFiles { "a" "a.vbf" }' + chr(10) + ' Fonts { }' + chr(10) + '}', 'b', 'b.vbf')
@@ -997,4 +996,25 @@ if __name__ == '__main__':
     open(sp, 'w').write('#base "safe.res"\n"S" { Fonts { } }\n'); load_scheme(sp)   # (a #base back to itself)
     assert sized({'tall': '12px'}, 1080, False)[1] == 12 and sized({'tall': '-50'}, 1080, False)[1] == 0, 'numbers as the game reads them'
     parse_kv_at('"a" { "b" "c" [$WIN32]')                                          # (a condition last in the file)
+    # the 2026-10-18 audit: #base merging (a byte-order mark too), list blocks the parser finds, numbers, conditions
+    open(os.path.join(tmp, 'base.res'), 'w').write('"S" { Fonts { "A" { "1" { "name" "Tahoma" "tall" "9" } } "B" { "1" { "tall" "7" } } } }')
+    for mark in ('', '\ufeff'):
+        open(sp, 'w', encoding='utf-8').write(mark + '#base "base.res"' + chr(10) + '"S" { Fonts { "A" { "1" { "name" "Arial" } } } }')
+        root, files = load_scheme(sp, read=lambda q: open(q, 'rb').read().decode('latin-1'))
+        a = dict(font_entries(root, 'A'))['1']
+        assert len(files) == 2 and a == {'name': 'Arial', 'tall': '9'} and font_entries(root, 'B'), (mark, a, files)
+    nl = chr(10)
+    two_lists = add_bitmap_file('"S"' + nl + '{' + nl + ' BitmapFontFiles // mine' + nl + ' {' + nl + '  "a" "a.vbf"' + nl + ' }' + nl + ' Fonts { }' + nl + '}', 'b', 'b.vbf')
+    assert two_lists.count('BitmapFontFiles') == 1 and [k for k, _ in find(parse_kv(two_lists)[0][1], 'BitmapFontFiles')] == ['a', 'b'], 'a comment after the name'
+    cf = '"S"' + nl + '{' + nl + ' CustomFontFiles' + nl + ' {' + nl + '  "1" { "font" "a.ttf" }' + nl + '  "2" "b.ttf"' + nl + ' }' + nl + ' Fonts { }' + nl + '}'
+    assert add_custom_font(cf, 'b.ttf', '3') == cf, 'listed already, after a block-form entry'
+    assert (atoi('700px'), atoi('true'), atoi(None, 5), atof('1.5x'), atof('')) == (700, 0, 5, 1.5, 0.0), 'atoi / atof'
+    assert sized({'scalex': '2', 'scaley': '1.5x'}, 1080, False)[4:] == (2.0, 1.5), 'each scale on its own'
+    assert fe(parse_kv('"S" { Fonts { "C" { "1" { "name" "Arial" [$win32] } } } }')[0][1], 'C', 1080)[0].get('name') == 'Arial', 'conditions ignore case'
+    # a page without point sampling: bilinear the card's way, still the letters
+    lin = os.path.join(tmp, 'lin.vtf'); v = bytearray(open(os.path.join(tmp, 'a.vtf'), 'rb').read()); v[20] &= 0xFE; open(lin, 'wb').write(bytes(v))
+    bl = BitmapFont(os.path.join(tmp, 'a.vbf'), lin, 2.0, 2.0)
+    assert not bl.point and bl.cell('S')[..., 3].max() == 255 and bl.cell('S').shape[0] == bl.height + 2, 'bilinear, scaled'
+    assert parse_kv('"a" "dir' + chr(92) + '" "b" "c"') == [('a', 'dir' + chr(92)), ('b', 'c')], 'no escapes'
+    assert block_text('"S" { Fonts { "A" { "1" { "name" "X" } } "B" { } } }', 'A')[1].startswith('"A"'), 'Raw: a one-line block'
     print('cssfont self-check passed')

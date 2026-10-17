@@ -101,7 +101,7 @@ NOTES = {'name': "The font's name in Windows. One that isn't installed draws as 
          'custom': 'With Anti-aliasing, also smooths letters past Latin-1 (Ā), but letters outside the Windows character set '
                    '(Cyrillic) turn into boxes',
          'blur': 'A glow round the letters, this many pixels wide',
-         'scanlines': 'Every this many rows a darker one (2 or more)',
+         'scanlines': 'Every row darker except each one this many apart (2 or more): lines this far apart',
          'bitmap': 'A picture of letters (.vbf) instead of a Windows font, drawn as made',
          'scalex': 'Bitmap fonts only: how much wider it is drawn', 'scaley': 'Bitmap fonts only: how much taller it is drawn'}
 GROWN_NOTES = {'antialias': 'No effect on this font: it grows with the screen, so the game always smooths it',
@@ -122,15 +122,9 @@ def on(v):
     """A flag's value: on unless missing or 0."""
     return bool(num(v))
 
-def num(v, d=0):
-    try: return int(float(v))
-    except (TypeError, ValueError): return d
+num = C.atoi                                                    # (numbers read as the game reads them)
 
-def write_atomic(path, data):
-    """Bytes to a file all at once: written beside it, then put in its place (a crash leaves the old file whole)."""
-    tmp = path + '.fonttester-tmp'
-    with open(tmp, 'wb') as f: f.write(data)
-    os.replace(tmp, path)
+write_atomic = C.write_atomic
 
 def load_settings():
     try:
@@ -288,15 +282,12 @@ def open_or_close(widget):
     """A dropdown's button: opens its list, or closes it when it's open already."""
     if Dropdown.now and Dropdown.now.opener is widget: Dropdown.now.close(); return True
 
-class Combo(ctk.CTkComboBox):
-    def _open_dropdown_menu(self):
-        if open_or_close(self): return
-        Dropdown(self, list(self.cget('values')), self.get(), self._dropdown_callback)
+def _open_dropdown_menu(self):                                  # (CTk's dropdowns: ours instead)
+    if open_or_close(self): return
+    Dropdown(self, list(self.cget('values')), self.get(), self._dropdown_callback)
 
-class Choice(ctk.CTkOptionMenu):
-    def _open_dropdown_menu(self):
-        if open_or_close(self): return
-        Dropdown(self, list(self.cget('values')), self.get(), self._dropdown_callback)
+class Combo(ctk.CTkComboBox): _open_dropdown_menu = _open_dropdown_menu
+class Choice(ctk.CTkOptionMenu): _open_dropdown_menu = _open_dropdown_menu
 
 class Ui:
     """The widgets, all one size and look."""
@@ -385,6 +376,7 @@ class App:
         self.mode, self.draw_kind = tk.StringVar(value='Custom'), tk.StringVar(value='Draw once')
         self.text, self.colour = tk.StringVar(value='Speed: 1284 u/s   WR: 17.707'), (255, 255, 255)
         self.every, self.screen, self.back = tk.StringVar(value='100'), tk.StringVar(value='2560x1440'), tk.StringVar(value='Dark grey')
+        self.screen_h = 1440                                    # (the screen edits are for: changed only once a size is whole)
         self.sends, self.speed, self.speed_colour, self.jump = [], 1284, GAIN[3], 0
         self.jtext, self.jcolour = '2: 384 (85%)\n79.23', GAIN[4]
         self.centre, self.zoom, self.recentre, self.scene, self.drag = [1280.0, 720.0], 1.0, True, None, None
@@ -461,8 +453,8 @@ class App:
         right = ui.panel(r); right.grid(row=0, column=2, sticky='nsew', padx=(0, GAP), pady=GAP)
         right.configure(width=360); right.grid_propagate(False); right.columnconfigure(0, weight=1); right.rowconfigure(3, weight=1)
         # Options or Raw: centred at the top, like the preview's toggles
-        self.raw, self.side_view = tk.BooleanVar(value=False), tk.StringVar(value='Options')
-        ui.segments(right, ['Options', 'Raw'], self.side_view, lambda v: (self.raw.set(v == 'Raw'), self.toggle_raw()), 220).grid(
+        self.side_view = tk.StringVar(value='Options')
+        ui.segments(right, ['Options', 'Raw'], self.side_view, lambda v: self.toggle_raw(), 220).grid(
             row=0, column=0, pady=(GAP, 0))
         head = ctk.CTkFrame(right, fg_color='transparent'); head.grid(row=1, column=0, sticky='ew', padx=16, pady=(10, 0))
         head.columnconfigure(0, weight=1)
@@ -540,7 +532,7 @@ class App:
         self.timers[fn.__name__] = self.root.after(ms, fn)
 
     def tmp_dir(self):
-        if not self.tmp: self.tmp = tempfile.mkdtemp(prefix='fonttester')
+        if not self.tmp: self.tmp = os.path.join(tempfile.gettempdir(), 'fonttester-look'); os.makedirs(self.tmp, exist_ok=True)
         return self.tmp
 
     # ---- the HUD's files ---------------------------------------------------------------------------------------------
@@ -602,7 +594,8 @@ class App:
             if sel:
                 self.tree.selection_set(sel); self.tree.see(sel[-1])
                 if not self.active and st.get('active') in sel: self.active = st['active']
-        self.set_active(self.active if self.active and self.tree.exists(self.active) else (list(self.tree.selection()) or [None])[-1])
+        new = self.active if self.active and self.tree.exists(self.active) else (list(self.tree.selection()) or [None])[-1]
+        self.set_active(new, resort=new != self.active or (new, self.h()) not in self.opts)
         self.saved_state()
 
     def watch(self):
@@ -620,6 +613,7 @@ class App:
             except OSError: continue                            # (being written, or locked: tried again next time)
             self.stamps[p] = m; changed = True
             if t is None: continue
+            if getattr(self, 'pending', None): self.flush()
             if self.texts[p] == self.disk[p]:
                 self.texts[p] = t                               # (the app's edits were based on the old text: dropped)
                 self.undo = [u for u in self.undo if p not in u[1]]
@@ -645,8 +639,7 @@ class App:
         return True
 
     def saved_state(self):
-        unsaved = any(self.texts[p] != self.disk[p] for p in self.texts)
-        self.save_button.configure(text='Save  •' if unsaved else 'Save')
+        self.save_button.configure(text='Save  •' if self.unsaved() else 'Save')
 
     def unsaved(self):
         return [p for p in self.texts if self.texts[p] != self.disk[p]]
@@ -700,7 +693,7 @@ class App:
 
     # ---- the fonts list ----------------------------------------------------------------------------------------------
     def fill_tree(self):
-        keep, q = set(self.tree.selection()), self.search_entry.get().strip().lower()
+        keep, focus, q = set(self.tree.selection()), self.tree.focus(), self.search_entry.get().strip().lower()
         self.tree.delete(*self.tree.get_children())
         have = {f'{s}: {f}' for s, items in self.schemes.items() for f, _ in (C.find(items, 'Fonts') or [])}
         favs = [i for i in self.favs if i in have and q in i.split(': ', 1)[1].lower()]
@@ -716,6 +709,7 @@ class App:
                 if not self.tree.exists(iid): self.tree.insert(short, 'end', iid=iid, text=self.label(iid))
         sel = [i for i in keep if self.tree.exists(i)]
         if sel: self.tree.selection_set(sel)
+        if focus and self.tree.exists(focus): self.tree.focus(focus)
 
     def label(self, iid):
         short, font = iid.split(': ', 1)
@@ -754,7 +748,7 @@ class App:
 
     # ---- the picked font's block -------------------------------------------------------------------------------------
     def h(self):
-        return num(self.screen.get().lower().split('x')[-1], 1080)
+        return self.screen_h
 
     def screen_size(self):
         try: w, h = (int(v) for v in self.screen.get().lower().split('x'))
@@ -762,8 +756,9 @@ class App:
         return (w, h) if 100 <= w <= 10000 and 100 <= h <= 10000 else None
 
     def screen_changed(self):
-        if not self.screen_size(): return
-        self.flush()
+        if not self.screen_size() or self.screen_size()[1] == self.screen_h: return
+        self.flush()                                            # (an edit waiting: written for the screen it was made at)
+        self.screen_h = self.screen_size()[1]
         self.set_active(self.active); self.fill_tree(); self.restart(recentre=True)
 
     def scales(self, iid):
@@ -789,11 +784,7 @@ class App:
 
     def current(self, iid):
         """The entry the game uses now at this screen (dict), or {}."""
-        h = self.h()
-        for _, d in self.entries(iid):
-            r = C.yres_range(d)
-            if not r or r[0] <= h <= r[1]: return d
-        return {}
+        return C.current(self.entries(iid), self.h())
 
     def state(self, iid):
         """The right side's options for a font at this screen: {key: value, or None: the block hasn't it}, '_extra': other keys.
@@ -843,7 +834,7 @@ class App:
                     if self.flags[k].get() != v: self.flags[k].set(v)
                 else:
                     v = o[k] if has else DEFAULT.get(k, '0')
-                    if self.values[k].get() != v: self.values[k].set(v)
+                    if self.values[k].get() != v and (resort or self.values[k].get().strip()): self.values[k].set(v)
             self.row_looks = looks
             names = self.bitmap_names() if on(o['bitmap']) else self.faces
             if names != getattr(self, 'name_values', None): self.value_widgets['name'].configure(values=names); self.name_values = names
@@ -852,12 +843,11 @@ class App:
         self.name_label.configure(text=font)
         self.scheme_label.configure(text=SCHEMES[short][:-4])
         self.describe()
-        if self.raw.get(): self.show_raw()
+        if self.side_view.get() == 'Raw': self.show_raw()
 
     def toggle_raw(self):
         """Raw on: the right side is the font's block, as the file has it; off: its options again."""
-        raw = self.raw.get()
-        if self.side_view.get() != ('Raw' if raw else 'Options'): self.side_view.set('Raw' if raw else 'Options')
+        raw = self.side_view.get() == 'Raw'
         self.root.update_idletasks()                            # (the toggle drawn in its new state before the work)
         self.set_active(self.active)
         with frozen(self.raw_box.master):                       # (the swap shown in one go, not half drawn)
@@ -1035,12 +1025,12 @@ class App:
         if on:
             if not name and not names:
                 self.set_active(self.active, resort=False); self.flash('No bitmap fonts in this HUD yet: Create bitmap font makes one'); return
-            if (o['name'] or '').lower() not in lower: self.face_before[key] = o['name']
+            if (o['name'] or '').lower() not in lower: self.face_before[self.active] = o['name']
             self.set_key(o, 'bitmap', '1')
             self.set_key(o, 'name', name or (o['name'] if (o['name'] or '').lower() in lower else names[0]))
         else:
             self.set_key(o, 'bitmap', None)
-            if (o['name'] or '').lower() in lower: self.set_key(o, 'name', self.face_before.get(key) or self.plain_face(key))
+            if (o['name'] or '').lower() in lower: self.set_key(o, 'name', self.face_before.get(self.active) or self.plain_face(key))
         self.set_active(self.active, resort=False); self.edited()
 
     def plain_face(self, key):
@@ -1048,10 +1038,8 @@ class App:
         start = self.start_opts.get(key) or {}
         return start.get('name') if not on(start.get('bitmap')) and start.get('name') else 'Tahoma'
 
-    def apply(self, iid=None):
+    def apply(self, iid):
         """The right side's block written as this screen's entry, into the app's copy (a change made: by itself)."""
-        iid = iid or self.active
-        if not iid: return
         short, font = iid.split(': ', 1)
         key, yres, before, d = self.target(iid)
         o, cur = self.state(iid), self.current(iid)
@@ -1061,9 +1049,9 @@ class App:
         if self.scales(iid):                                   # (in place: a #base file's key would come back)
             based = self.base_keys(short, font, key, where)
             for k in KEYS:
-                if o[k] is None and k in based and (KIND[k] is None or k in ('blur', 'scanlines')): d[k] = '0'
+                if o[k] is None and k in based and k != 'name': d[k] = DEFAULT.get(k, '0')
         text = self.texts[where]
-        if on(o['bitmap']) and d.get('name', '').lower() not in self.bitmaps:
+        if on(o['bitmap']) and d.get('name', '').lower() in self.made and d['name'].lower() not in self.bitmaps:
             text = C.add_bitmap_file(text, d['name'], f'materials/vgui/fonts/{d["name"]}.vbf')
         try: text = C.set_font_entry(text, font, key, d, before=before)
         except ValueError as ex: self.flash(str(ex)); return
@@ -1071,11 +1059,9 @@ class App:
         for k in [k for k in self.opts if k[0] == iid]: self.opts.pop(k); self.start_opts.pop(k, None)
         self.opts[(iid, self.h())], self.start_opts[(iid, self.h())] = mine_now, copy.deepcopy(mine_now)   # (the HUD's now)
         new = key not in [k for k, _ in self.entries(iid)]
-        if self.change(f'{font} entry {key}', {where: text}) and new:   # (a new entry: said where; else the Save dot says it)
-            self.flash(f'{font}: a new entry "{key}" ({yres.replace(" ", "–") if yres else "grows with the screen"}) in '
-                       f'{os.path.basename(where)}, not saved yet')
-        if iid == self.active: self.set_active(iid, resort=False)
-        self.fill_tree()
+        if not self.change(f'{font} entry {key}', {where: text}): self.fill_tree(); return   # (changed: reloaded, all shown)
+        if new: self.flash(f'{font}: a new entry "{key}" ({yres.replace(" ", "–") if yres else "grows with the screen"}) in '
+                           f'{os.path.basename(where)}, not saved yet')   # (a new entry: said where; else the Save dot says it)
 
     def base_keys(self, short, font, key, where):
         """The keys the scheme's other files (its #base ones) give this font's entry `key`."""
@@ -1313,7 +1299,7 @@ class Maker:
         f = app.font(app.active)[0]
         tmp = not isinstance(f, C.Win32Font)
         if tmp:                                                 # (a bitmap one: from the face it had)
-            face = app.face_before.get((app.active, app.h())) or app.plain_face((app.active, app.h()))
+            face = app.face_before.get(app.active) or app.plain_face((app.active, app.h()))
             f = C.Win32Font(face, max(8, num(o['tall'], 24)), num(o['weight'], 400), flags=C.FONTFLAG['antialias'])
         self.win = win = ctk.CTkToplevel(app.root, fg_color=BG)
         if not show: win.withdraw()
@@ -1477,6 +1463,7 @@ if __name__ == '__main__':
     if selftest:                                            # (on a HUD of its own: works on any PC, touches nothing)
         try:
             hud = os.path.join(tempfile.mkdtemp(), 'selftest')
+            import atexit, shutil; atexit.register(shutil.rmtree, os.path.dirname(hud), True)
             os.makedirs(os.path.join(hud, 'resource'))
             with open(os.path.join(hud, 'resource', 'ClientScheme.res'), 'w') as f:
                 f.write('"Scheme" { Fonts { CenterPrintText { "1" { "name" "Tahoma" "tall" "18" } } } }' + chr(10))

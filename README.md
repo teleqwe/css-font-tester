@@ -63,7 +63,7 @@ Runs the checks (`python cssfont.py`, then `python test_fonttester.py`, which ru
     with it: Windows' own fonts (Arial and the like) may not be passed on.
   - **Save** writes the changed scheme files (• on it while there are changes); if one changed on disk since, it asks
     first. Closing the app or opening another HUD with changes not saved asks too. **Undo** takes back the last change
-    (Apply, Add, a made bitmap font and the files it made, if not saved yet); **Restore** puts the font blocks back as
+    (an edit, Add font to HUD, a made bitmap font and the files it made, if not saved yet); **Restore** puts the font blocks back as
     they were when the app opened (then Save; font files it added stay).
   - **Create bitmap font**: a font made from every setting a picture of letters can hold: face, size, weight,
     anti-aliasing, italic, underline, strike-out, the game's drop shadow and outline at any size (not just 1 px), a
@@ -85,7 +85,7 @@ copied):
 - the cell: ABC width b plus the effects' margins, the font's height (+1 for a drop shadow, +2 for an outline);
 - effects in the game's order and with its quirks: drop shadow (black into clear pixels, the alpha of the pixel
   up-left), outline (solid black on clear pixels next to any lit pixel, faint ones too), blur (alpha only, turns the
-  letter white), scan lines (every other row x 0.7), rotary (a grey middle line);
+  letter white), scan lines (every row x 0.7 except each n-th), rotary (a grey middle line);
 - the line: each letter at pen + a, pen + a + b + c, every character drawn, spaces too (a blank cell that still takes
   the rotary line and an underline); an underlined letter's cell is a + b + c wide and goes at the pen (a smoothed
   one a further a to the left);

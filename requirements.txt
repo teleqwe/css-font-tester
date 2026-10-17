@@ -1,4 +1,4 @@
 pillow>=12.3
 numpy>=2.5
-customtkinter>=6.0
+customtkinter>=6.0,<7   # (its dropdown and scaling internals are used: a 7 may rename them)
 pyinstaller>=6.22   # (only to build the exe)

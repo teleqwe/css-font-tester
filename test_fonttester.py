@@ -7,14 +7,16 @@ spec = importlib.util.spec_from_file_location('ft', os.path.join(HERE, 'fonttest
 ft = importlib.util.module_from_spec(spec); spec.loader.exec_module(ft)
 C = ft.C
 temp = tempfile.mkdtemp()                                  # (everything this writes; removed at the end)
+import atexit; atexit.register(shutil.rmtree, temp, True)
+tempfile.tempdir = temp                                    # (the app's own temp files in it too)
 ft.SETTINGS = os.path.join(temp, 'settings.json')
 
 # the HUD: a copy of tests/hud (fonts every Windows PC has), its CenterPrintText named Lexend with a drop shadow
 hud = os.path.join(temp, 'huds', 'hud')
 shutil.copytree(os.path.join(HERE, 'tests', 'hud', 'resource'), os.path.join(hud, 'resource'))
 scheme = os.path.join(hud, 'resource', 'ClientScheme.res')
-C.edit_scheme(scheme, lambda t: C.set_font_entry(t, 'CenterPrintText', '1', {'name': 'Lexend', 'tall': '18', 'weight': '700', 'additive': '0',
-                                                                          'outline': '0', 'antialias': '1', 'dropshadow': '1'}))
+C.write_atomic(scheme, C.set_font_entry(open(scheme, 'rb').read().decode('latin-1'), 'CenterPrintText', '1', {'name': 'Lexend', 'tall': '18', 'weight': '700', 'additive': '0',
+                                                                          'outline': '0', 'antialias': '1', 'dropshadow': '1'}).encode('latin-1'))
 ft.CUSTOM = os.path.dirname(hud)
 
 ctk.set_appearance_mode('dark')
@@ -93,7 +95,7 @@ app.save(); pump()
 assert f'"{key}"' not in open(scheme, encoding='latin-1').read(), 'restored and saved'
 
 # Raw: the right side is the block as the file has it, from its name to the line before the next font's
-app.raw.set(True); app.toggle_raw(); pump()
+app.side_view.set('Raw'); app.toggle_raw(); pump()
 shown = app.raw_box.get('1.0', 'end-1c')
 line, block = C.block_text(app.texts[scheme], 'HudHintText')
 assert shown.startswith('HudHintText') and app.side_view.get() == 'Raw', 'from the left edge'
@@ -101,7 +103,7 @@ assert [r.strip() for r in shown.split(chr(10))] == [r.strip() for r in block.sp
 assert app.raw_box.winfo_manager() == 'grid' and app.save_button.winfo_manager() == 'grid', 'over the name to the buttons only'
 nxt = app.texts[scheme][app.texts[scheme].index(block) + len(block):].lstrip().split()[0]
 assert nxt not in ('{', '}', '"1"'), nxt
-app.raw.set(False); app.toggle_raw(); pump()
+app.side_view.set('Options'); app.toggle_raw(); pump()
 assert not app.raw_box.winfo_manager()
 # CenterPrintText grows with the screen: changed in place, no yres, no more entries
 pick('Client: CenterPrintText')
@@ -143,7 +145,10 @@ assert bf.height == font.height + 10 and app.target('Client: CenterPrintText')[1
 assert any(n == 'tst' for n, _ in C.find(app.schemes['Client'], 'BitmapFontFiles'))
 app.flags['bitmap'].set(False); app.flagged('bitmap'); pump()
 assert isinstance(app.font('Client: CenterPrintText')[0], C.Win32Font) and app.state('Client: CenterPrintText')['name'] == 'Lexend'
-for _ in range(4):                                                      # (back to before Make, one change at a time)
+app.values['name'].set('ts'); pump(); app.flush(); pump()              # (a name on the way to another: not listed)
+assert not any(n == 'ts' for n, _ in C.find(app.schemes['Client'], 'BitmapFontFiles')), 'no line for a name being typed'
+app.values['name'].set('tst'); pump(); app.flush(); pump()
+for _ in range(8):                                                      # (back to before Make, one change at a time)
     if not os.path.isfile(os.path.join(hud, 'materials', 'vgui', 'fonts', 'tst.vbf')): break
     app.undo_last(); pump()
 assert not os.path.isfile(os.path.join(hud, 'materials', 'vgui', 'fonts', 'tst.vbf')), 'undone: the files gone too'
@@ -154,17 +159,17 @@ app.mode.set('Speedometer'); app.every.set('50'); app.restart(); pump(0.6)
 speeds = set()
 for _ in range(10): speeds.add(app.speed); pump(0.06)
 assert len(speeds) > 3, speeds
-app.draw_kind.set('Real to game'); app.restart(); pump(0.5)
-assert app.copies('Client: CenterPrintText') in (3, 4, 5) and app.copies('Source: Trebuchet24') == 1, 'held 0.2 s, sent every 50 ms'
+app.draw_kind.set('Real to game'); app.restart(); pump(0.2)
+now = time.monotonic()
+app.sends = [now - 0.01, now - 0.06, now - 0.11, now - 0.25]              # (held 0.2 s: three still up)
+assert app.copies('Client: CenterPrintText') == 3 and app.copies('Source: Trebuchet24') == 1, 'held 0.2 s: one per send still up'
 app.every.set('1'); app.restart(); pump(0.1)
 drawn = app.scene; pump(0.3)
 assert app.scene is not drawn, 'sent every 1 ms: still drawn'
-app.mode.set('jhud'); app.every.set('700'); app.restart(); pump(0.2)
-t0 = app.jtext; assert app.copies('Client: CenterPrintText') == 1
-end = time.time() + 1.5
-while app.jtext == t0 and time.time() < end: pump(0.01)
-assert app.jtext != t0 and app.copies('Client: CenterPrintText') == 2, 'the next jump: both held (1 s)'
-pump(0.45); assert app.copies('Client: CenterPrintText') == 1, 'the first one run out'
+app.mode.set('jhud'); app.every.set('700'); app.restart(); pump(0.1)
+now = time.monotonic()
+app.sends = [now - 0.8, now - 0.1]; assert app.copies('Client: CenterPrintText') == 2, 'two jumps held (1 s each)'
+app.sends = [now - 1.2, now - 0.1]; assert app.copies('Client: CenterPrintText') == 1, 'the first one run out'
 app.mode.set('Custom'); app.draw_kind.set('Draw once'); app.restart(); pump()
 assert app.copies('Client: CenterPrintText') == 1
 
@@ -187,6 +192,27 @@ os.makedirs(os.path.dirname(taken), exist_ok=True); open(taken + '.vbf', 'wb').w
 mk.name.set('theirs'); mk.make(); pump()
 assert open(taken + '.vbf', 'rb').read() == b'theirs' and 'already' in mk.msg.cget('text'), 'Make never writes over a font'
 mk.close()
+
+# the 2026-10-18 audit
+pick('Client: HudHintText'); keys0 = [k for k, _ in app.entries('Client: HudHintText')]
+app.screen.set('1920x10'); pump(0.5)                                      # (half typed: still the 1440 edits)
+app.value_widgets['weight'].plus.invoke(); pump(); app.flush(); pump()
+assert [k for k in [k for k, _ in app.entries('Client: HudHintText')] if k not in keys0] == ['1200+'], 'written for 1440'
+app.screen.set('2560x1440'); pump(0.5); app.undo_last(); pump()
+app.tree.selection_set(['Client: HudHintText', 'Source: Trebuchet24']); app.tree.focus('Client: HudHintText'); pump()
+app.value_widgets['weight'].plus.invoke(); pump(0.6)
+assert app.active == 'Client: HudHintText', 'still the font being edited after its change goes in'
+app.undo_last(); pump()
+pick('Source: Trebuchet24'); src = os.path.join(hud, 'resource', 'SourceScheme.res')
+w = str(int(app.values['weight'].get()) + 100); app.values['weight'].set(w); pump(0.1)
+open(src, 'ab').write(b'// outside' + chr(10).encode()); os.utime(src, (time.time() + 5, time.time() + 5)); app.watch(); pump()
+assert app.state('Source: Trebuchet24')['weight'] == w and src in app.conflicts, 'the edit kept, the clash noted'
+app.undo_last(); pump()
+pick('Client: CenterSpeedText'); assert app.state('Client: CenterSpeedText')['scalex'] == '2', 'from base.res'
+app.values['scalex'].set('1'); pump(); app.flush(); pump()
+assert app.entries('Client: CenterSpeedText')[0][1].get('scalex') == '1', 'taken out: written as 1, not the base 2'
+assert app.tree.exists('Client: BaseOnly'), 'a font only the #base file has'
+app.undo_last(); pump()
 
 # a dropdown opens under (or above) its button, not in the screen's corner; see-through here, nothing shows on screen
 real_top = ft.tk.Toplevel
@@ -233,5 +259,4 @@ again = ft.App(root2)
 assert again.hud == app.hud and set(again.tree.selection()) == {'Client: HudHintText', 'Source: Trebuchet24'} and again.active == 'Client: HudHintText'
 root2.destroy()
 root.destroy()
-shutil.rmtree(temp, ignore_errors=True)
 print('font tester test passed')

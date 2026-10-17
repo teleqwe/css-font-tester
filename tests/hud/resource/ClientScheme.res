@@ -1,4 +1,5 @@
 // The test HUD (test_fonttester.py works on a copy): fonts every Windows PC has.
+#base "base.res"
 "Scheme"
 {
 	BitmapFontFiles
@@ -61,6 +62,14 @@
 				"weight"	"400"
 				"antialias"	"1"
 				"yres"		"1200 9999"
+			}
+		}
+		CenterSpeedText
+		{
+			"1"
+			{
+				"name"		"Tahoma"
+				"tall"		"16"
 			}
 		}
 		DefaultSmall
