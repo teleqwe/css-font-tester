@@ -30,6 +30,7 @@ def find_game():
         if os.path.isdir(p): return os.path.realpath(p)            # (its real letter case: Steam keeps it lower-case)
     return None
 
+VERSION = '1.0'                                                # (in the window title; the release is v1.0.0)
 GAME = find_game()                                             # (cstrike: where a HUD's missing bitmap files come from)
 CUSTOM = os.path.join(GAME, 'custom') if GAME else ''          # (no game found: HUDs opened with Open…)
 HERE = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__))
@@ -357,7 +358,7 @@ class Ui:
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('Font Tester')
+        root.title(f'Font Tester {VERSION}')
         self.vanilla = vanilla_dirs()
         self.ui = Ui()
         # the HUD's scheme files: the app's copy, as last read or saved, and as first read (Restore)

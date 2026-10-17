@@ -5,8 +5,9 @@ It redraws by itself when the HUD's scheme or font files change (unless they hav
 
 ![The Font Tester: a HUD's fonts on the left, the preview in the middle, the font's block on the right](docs/screenshot.png)
 
-Windows only: it draws with Windows' own font calls, as the game does. Download `FontTester.exe` from the Releases page
-and double-click it, or run it from source (below). The exe isn't signed, so Windows SmartScreen or an antivirus may warn
+Windows only: it draws with Windows' own font calls, as the game does. The current version is **1.0**: download
+`FontTester.exe` from the [1.0 release](https://github.com/teleqwe/css-font-tester/releases/tag/v1.0.0) and double-click
+it, or run it from source (below). The exe isn't signed, so Windows SmartScreen or an antivirus may warn
 about it the first time.
 
 It finds Counter-Strike: Source through Steam (any of its library folders) and opens the HUD in its `custom` folder
